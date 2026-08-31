@@ -1,0 +1,246 @@
+#include <Servo.h>
+
+// ---------------- PINS ----------------
+
+const int pirPin = 6;
+const int ldrPin = A0;
+const int ledPin = 8;
+
+const int trigPin = 9;
+const int echoPin = 10;
+
+const int servoPin = 11;
+
+// ---------------- SETTINGS ----------------
+
+const int lightThreshold = 600;
+
+// Maximum distance at which a person is detected
+const int personDistance = 10;  // cm
+
+// How long the system can go without a detection (PIR or ultrasonic) before stopping scan
+const unsigned long noMotionTimeout = 1200;   // increased from 300 -> covers a full servo sweep cycle
+
+// How long ultrasonic can miss the person before LED flag drops
+const unsigned long absenceTime = 1000;
+
+// Servo scanning limits
+const int scanMin = 45;
+const int scanMax = 135;
+
+// Servo speed
+const int scanStep = 5;
+const int scanDelay = 1;
+
+// ---------------- VARIABLES ----------------
+
+Servo scannerServo;
+
+int servoAngle = scanMin;
+int servoDirection = 1;
+
+bool scanning = false;
+bool personInside = false;
+
+unsigned long lastMotionTime = 0;
+unsigned long lastPersonDetected = 0;
+unsigned long lastServoMove = 0;
+
+// ---------------- SETUP ----------------
+
+void setup() {
+
+  pinMode(pirPin, INPUT);
+  pinMode(ledPin, OUTPUT);
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  Serial.begin(9600);
+
+  scannerServo.attach(servoPin);
+  scannerServo.write(scanMin);
+
+  digitalWrite(ledPin, LOW);
+
+  Serial.println("Smart Room System");
+  Serial.println("PIR calibrating...");
+
+  delay(10000);
+
+  Serial.println("System Ready!");
+}
+
+// ---------------- HC-SR04 ----------------
+
+long getDistance() {
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000);
+
+  if (duration == 0) {
+    return 999;
+  }
+
+  return duration * 0.034 / 2;
+}
+
+// ---------------- SERVO SCANNING ----------------
+
+void scanServo() {
+
+  if (millis() - lastServoMove >= scanDelay) {
+
+    lastServoMove = millis();
+
+    servoAngle += servoDirection * scanStep;
+
+    if (servoAngle >= scanMax) {
+      servoAngle = scanMax;
+      servoDirection = -1;
+    }
+
+    if (servoAngle <= scanMin) {
+      servoAngle = scanMin;
+      servoDirection = 1;
+    }
+
+    scannerServo.write(servoAngle);
+  }
+}
+
+// ---------------- LOOP ----------------
+
+void loop() {
+
+  int ldrValue = analogRead(ldrPin);
+  bool isDark = (ldrValue > lightThreshold);
+
+  // ------------------------------------------------
+  // ROOM ALREADY BRIGHT -> everything OFF, skip PIR/servo/ultrasonic entirely
+  // ------------------------------------------------
+
+  if (!isDark) {
+
+    if (scanning) {
+      Serial.println(">>> ROOM IS BRIGHT - SYSTEM OFF <<<");
+    }
+
+    scanning = false;
+    personInside = false;
+
+    digitalWrite(ledPin, LOW);
+
+    scannerServo.write(scanMin);
+
+    if (scannerServo.attached()) {
+      delay(300);
+      scannerServo.detach();   // no need to hold position, room is lit already
+    }
+
+    servoAngle = scanMin;
+    servoDirection = 1;
+
+    delay(20);
+    return;   // skip the rest of the loop completely
+  }
+
+  // ------------------------------------------------
+  // FROM HERE ON: ROOM IS DARK -> normal sensing logic runs
+  // ------------------------------------------------
+
+  int pirState = digitalRead(pirPin);
+
+  // ------------------------------------------------
+  // PIR DETECTS MOTION -> (re)starts scan, refreshes timer
+  // ------------------------------------------------
+
+  if (pirState == HIGH) {
+
+    lastMotionTime = millis();
+
+    if (!scanning) {
+      scanning = true;
+
+      if (!scannerServo.attached()) {
+        scannerServo.attach(servoPin);
+      }
+
+      Serial.println();
+      Serial.println(">>> MOTION DETECTED <<<");
+      Serial.println("Starting ultrasonic scan...");
+    }
+  }
+
+  // ------------------------------------------------
+  // SCANNING (only runs while scanning == true)
+  // ------------------------------------------------
+
+  if (scanning) {
+
+    scanServo();
+
+    long distance = getDistance();
+
+    Serial.print("Servo: ");
+    Serial.print(servoAngle);
+    Serial.print("° | Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
+
+    if (distance <= personDistance) {
+
+      if (!personInside) {
+        Serial.println(">>> PERSON DETECTED <<<");
+      }
+
+      personInside = true;
+      lastPersonDetected = millis();
+      lastMotionTime = millis();   // keeps scan alive while person stands still in front of ultrasonic
+
+    }
+    else if (personInside &&
+             millis() - lastPersonDetected > absenceTime) {
+
+      personInside = false;
+      Serial.println(">>> Ultrasonic lost person (still scanning) <<<");
+    }
+
+    // STOP SCAN ONLY WHEN NOTHING (PIR or ultrasonic) HAS SEEN A PERSON FOR noMotionTimeout
+    if (millis() - lastMotionTime > noMotionTimeout) {
+
+      scanning = false;
+      personInside = false;
+
+      Serial.println(">>> NO MOTION - STOPPING SCAN <<<");
+
+      scannerServo.write(scanMin);
+      delay(300);
+      scannerServo.detach();
+
+      servoAngle = scanMin;
+      servoDirection = 1;
+    }
+  }
+
+  // ------------------------------------------------
+  // LIGHT CONTROL
+  // ------------------------------------------------
+
+  if (personInside && isDark) {
+    digitalWrite(ledPin, HIGH);
+    Serial.println("LIGHT: ON");
+  } else {
+    digitalWrite(ledPin, LOW);
+    Serial.println("LIGHT: OFF");
+  }
+
+  delay(20);
+}
